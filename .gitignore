@@ -1,5 +1,6 @@
 .next
 *.tsbuildinfo
 node_modules
-.env.local
+.env*
+!.env.example
 coverage

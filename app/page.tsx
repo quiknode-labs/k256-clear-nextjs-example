@@ -1,23 +1,10 @@
 "use client";
 
-import { PublicKey, Transaction, TransactionInstruction } from "@solana/web3.js";
-import { Buffer } from "buffer";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 
-import { CLUSTERS, type ClearReceipt, type Cluster, type Gate } from "@/lib/clear";
-
-interface SolanaProvider {
-  isPhantom?: boolean;
-  connect(): Promise<{ publicKey: PublicKey }>;
-  signTransaction(transaction: Transaction): Promise<Transaction>;
-}
-
-declare global {
-  interface Window { phantom?: { solana?: SolanaProvider } }
-}
-
-const MEMO_PROGRAM = new PublicKey("MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr");
+import { CLUSTERS, type Cluster, type Gate } from "@/lib/clear";
+import { actionHash, signAndSendMemo } from "@/lib/memo-client";
 
 export default function Home() {
   const router = useRouter();
@@ -31,43 +18,9 @@ export default function Home() {
     setBusy(true);
     setError(null);
     try {
-      const wallet = window.phantom?.solana;
-      if (!wallet) throw new Error("Install or open Phantom, then try again.");
-      const { publicKey } = await wallet.connect();
-      const blockhashResponse = await fetch(`/api/rpc?cluster=${cluster}`, { cache: "no-store" });
-      const blockhashBody = await blockhashResponse.json() as {
-        blockhash?: string; lastValidBlockHeight?: number; error?: string;
-      };
-      if (!blockhashResponse.ok || !blockhashBody.blockhash || blockhashBody.lastValidBlockHeight == null) {
-        throw new Error(blockhashBody.error ?? "Could not read a recent blockhash");
-      }
-      const transaction = new Transaction({
-        feePayer: publicKey,
-        recentBlockhash: blockhashBody.blockhash,
-      }).add(new TransactionInstruction({
-        programId: MEMO_PROGRAM,
-        keys: [],
-        data: Buffer.from(memo, "utf8"),
-      }));
-      const signed = await wallet.signTransaction(transaction);
-      const signedBytes = signed.serialize();
-      let binary = "";
-      for (const byte of signedBytes) binary += String.fromCharCode(byte);
-      const response = await fetch("/api/intents", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          cluster,
-          commitment_target: gate,
-          signed_tx_base64: btoa(binary),
-          blockhash: blockhashBody.blockhash,
-          last_valid_block_height: blockhashBody.lastValidBlockHeight,
-        }),
-      });
-      const receipt = await response.json() as ClearReceipt & { error?: string };
-      if (!response.ok) throw new Error(receipt.error ?? "Clear rejected the send");
-      localStorage.setItem("last-clear-intent", receipt.intent_id);
-      router.push(`/intents/${receipt.intent_id}?gate=${gate}`);
+      const action = { cluster, gate, memo };
+      const receipt = await signAndSendMemo(action);
+      router.push(`/intents/${receipt.intent_id}${actionHash(action)}`);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "The transaction could not be sent");
       setBusy(false);

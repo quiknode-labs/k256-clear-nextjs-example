@@ -1,7 +1,9 @@
 import { NextResponse } from "next/server";
 
 import { CLUSTERS, clearSendOrigin, type Cluster } from "@/lib/clear";
-import { clearApiKey, clearJson } from "@/lib/server";
+import { clearApiKey, publicError, responseJson, routeFailureStatus } from "@/lib/server";
+
+export const maxDuration = 15;
 
 export async function GET(request: Request) {
   const cluster = new URL(request.url).searchParams.get("cluster") as Cluster | null;
@@ -22,8 +24,13 @@ export async function GET(request: Request) {
         params: [{ commitment: "confirmed" }],
       }),
       cache: "no-store",
+      signal: AbortSignal.timeout(10_000),
     });
-    const body = await clearJson(response) as {
+    const raw = await responseJson(response);
+    if (!response.ok) {
+      return NextResponse.json(publicError(raw, `RPC request failed with HTTP ${response.status}`), { status: response.status });
+    }
+    const body = raw as {
       result?: { value?: { blockhash?: string; lastValidBlockHeight?: number } };
       error?: { message?: string };
     };
@@ -34,6 +41,6 @@ export async function GET(request: Request) {
     }
     return NextResponse.json(value);
   } catch (error) {
-    return NextResponse.json({ error: error instanceof Error ? error.message : "RPC request failed" }, { status: 502 });
+    return NextResponse.json({ error: error instanceof Error ? error.message : "RPC request failed" }, { status: routeFailureStatus(error) });
   }
 }
