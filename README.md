@@ -30,7 +30,9 @@ control origin for a private environment.
 2. `/api/intents` keeps the Clear API key server-side and returns the compact send receipt.
 3. The app immediately navigates to `/intents/<intent_id>`, making reload recovery automatic.
 4. The watcher reads an immediate snapshot, then calls
-   `?wait=true&cursor=<version>` until finalized or an actionable terminal state.
+   the realtime lifecycle stream (`GET /v1/clear/events?id=…`, JSON long-poll rendering,
+   resumed by `seq` cursor) and re-reads the canonical snapshot once per real transition,
+   until finalized or an actionable terminal state.
 5. A disconnected browser retries from its last version with bounded backoff. Clear keeps
    landing independently.
 6. If signed bytes expire, the intent page rebuilds the same memo with fresh validity and

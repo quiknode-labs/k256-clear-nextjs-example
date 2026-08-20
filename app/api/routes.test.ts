@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { GET as readEvents } from "@/app/api/intents/[id]/events/route";
 import { GET as readIntent, POST as cancelIntent } from "./intents/[id]/route";
 import { POST as sendIntent } from "./intents/route";
 import { GET as readiness } from "./ready/route";
@@ -92,7 +93,23 @@ describe.sequential("Clear API routes", () => {
     expect(body.origin_geo).toBeUndefined();
   });
 
-  it("uses the bounded upstream timeout only for a long poll", async () => {
+  it("proxies the events long-poll with the seq cursor", async () => {
+    const fetchMock = vi.fn(async (_url: string | URL | Request) => Response.json({
+      events: [{ seq: 7, event: "intent.confirmed", payload: { id: "lc_example" } }],
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const response = await readEvents(
+      new Request("http://localhost/api/intents/lc_example/events?cursor=6"),
+      { params: Promise.resolve({ id: "lc_example" }) },
+    );
+
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain("/v1/clear/events?id=lc_example&cursor=6");
+    const body = await response.json() as { events: Array<{ seq: number }> };
+    expect(body.events[0]?.seq).toBe(7);
+  });
+
+  it("never forwards the retired ?wait long-poll params on the snapshot read", async () => {
     const fetchMock = vi.fn(async (_url: string | URL | Request) => Response.json({
       intent_id: "lc_example", version: 1, status: "submitted", cluster: "mainnet",
       commitment_target: "confirmed", signature: "signature", explorer_url: null,
@@ -105,7 +122,8 @@ describe.sequential("Clear API routes", () => {
       { params: Promise.resolve({ id: "lc_example" }) },
     );
 
-    expect(fetchMock.mock.calls[0]?.[0]).toContain("wait=true&cursor=1&timeout=20");
+    expect(String(fetchMock.mock.calls[0]?.[0])).not.toContain("wait");
+    expect(String(fetchMock.mock.calls[0]?.[0])).not.toContain("cursor");
   });
 
   it("preserves an immediate status 404 for the watcher retry policy", async () => {

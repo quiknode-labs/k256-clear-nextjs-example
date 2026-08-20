@@ -4,21 +4,13 @@ import { clearApiKey, projectIntent, publicError, readOrigin, responseJson, rout
 
 export const maxDuration = 30;
 
-export async function GET(request: Request, context: { params: Promise<{ id: string }> }) {
+export async function GET(_request: Request, context: { params: Promise<{ id: string }> }) {
   const { id } = await context.params;
   if (!/^[A-Za-z0-9_-]{1,128}$/.test(id)) {
     return NextResponse.json({ error: "invalid intent id" }, { status: 400 });
   }
-  const input = new URL(request.url).searchParams;
-  const query = new URLSearchParams();
-  const wait = input.get("wait") === "true";
-  if (wait) query.set("wait", "true");
-  const cursor = input.get("cursor");
-  if (cursor && /^\d+$/.test(cursor)) query.set("cursor", cursor);
-  if (wait) query.set("timeout", "20");
   try {
-    const suffix = query.size > 0 ? `?${query}` : "";
-    const response = await fetch(`${readOrigin}/v1/clear/intents/${encodeURIComponent(id)}${suffix}`, {
+    const response = await fetch(`${readOrigin}/v1/clear/intents/${encodeURIComponent(id)}`, {
       headers: { Authorization: `Bearer ${clearApiKey()}` },
       cache: "no-store",
       signal: AbortSignal.timeout(25_000),

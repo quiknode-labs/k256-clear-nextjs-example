@@ -28,22 +28,77 @@ export function IntentWatcher({ intentId }: { intentId: string }) {
     let alive = true;
     let controller: AbortController | null = null;
     async function watch() {
-      let cursor: number | null = null;
+      // Two clocks, deliberately distinct (the Clear contract): `seq` is the
+      // DELIVERY cursor of the realtime stream (/v1/clear/events — resumes the
+      // long-poll exactly where this page left off); `version` is the intent's
+      // LIFECYCLE clock (guards against ever applying an older snapshot).
+      let seq: number | null = null;
+      let version: number | null = null;
       let consecutiveFailures = 0;
       let hasSnapshot = false;
       let terminalObservedAt: number | null = null;
       setTerminalWatchComplete(false);
+
+      // One canonical snapshot per real transition: the stream is the change
+      // signal, the snapshot read is the truth. Returns true to keep watching.
+      async function readSnapshot(signal: AbortSignal): Promise<boolean> {
+        const response = await fetch(`/api/intents/${encodeURIComponent(intentId)}`, {
+          cache: "no-store",
+          signal,
+        });
+        const body = await response.json() as ClearIntent & { error?: unknown };
+        if (!response.ok) {
+          const message = errorMessage(body, `Status read failed with HTTP ${response.status}`);
+          if (!retryableStatus(response.status, hasSnapshot)) {
+            setConnected(false);
+            setWatchError(message);
+            setWillRetry(false);
+            setCanRetryStatus(true);
+            return false;
+          }
+          throw new Error(message);
+        }
+        if (version != null && body.version < version) {
+          throw new Error("Clear returned an older intent version");
+        }
+        version = body.version;
+        setIntent(body);
+        setConnected(true);
+        setWatchError(null);
+        setWillRetry(false);
+        setCanRetryStatus(false);
+        hasSnapshot = true;
+        const everBroadcast = intentEverBroadcast(body);
+        if (["invalid", "canceled"].includes(body.status) && everBroadcast) {
+          terminalObservedAt ??= Date.now();
+        }
+        if (watcherDone(body.status, terminalObservedAt, Date.now(), everBroadcast)) {
+          setTerminalWatchComplete(true);
+          return false;
+        }
+        return true;
+      }
+
       while (alive) {
         controller = new AbortController();
-        const query = cursor == null ? "" : `?wait=true&cursor=${cursor}`;
         try {
-          const response = await fetch(`/api/intents/${encodeURIComponent(intentId)}${query}`, {
+          const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(40_000)]);
+          if (!hasSnapshot) {
+            if (!(await readSnapshot(signal))) return;
+            if (!alive) return;
+          }
+          // Long-poll the stream: with a cursor the gateway HOLDS the request
+          // until the intent moves (or its wait budget elapses and returns []).
+          // The first call has no cursor — it replays retained history and
+          // closes with k256.ready, whose seq seeds the cursor.
+          const query = seq == null ? "" : `?cursor=${seq}`;
+          const response = await fetch(`/api/intents/${encodeURIComponent(intentId)}/events${query}`, {
             cache: "no-store",
-            signal: AbortSignal.any([controller.signal, AbortSignal.timeout(30_000)]),
+            signal,
           });
-          const body = await response.json() as ClearIntent & { error?: unknown };
+          const body = await response.json() as { events?: Array<{ seq: number; event: string; payload: Record<string, unknown> }>; error?: unknown };
           if (!response.ok) {
-            const message = errorMessage(body, `Status read failed with HTTP ${response.status}`);
+            const message = errorMessage(body, `Events read failed with HTTP ${response.status}`);
             if (!retryableStatus(response.status, hasSnapshot)) {
               if (!alive) return;
               setConnected(false);
@@ -55,27 +110,24 @@ export function IntentWatcher({ intentId }: { intentId: string }) {
             throw new Error(message);
           }
           if (!alive) return;
-          if (cursor != null && body.version < cursor) {
-            throw new Error("Clear returned an older intent version");
+          let transitioned = false;
+          for (const frame of body.events ?? []) {
+            if (frame.event === "k256.gap") {
+              // History rotated out — the snapshot below is the truth; resume
+              // from the retained head (0 on an expired stream: wait live).
+              const head = frame.payload?.retained_head;
+              seq = typeof head === "number" ? head : 0;
+              transitioned = true;
+              continue;
+            }
+            seq = frame.seq;
+            if (frame.event.startsWith("intent.") && frame.payload?.id === intentId) transitioned = true;
           }
-          setIntent(body);
           setConnected(true);
           setWatchError(null);
           setWillRetry(false);
-          setCanRetryStatus(false);
           consecutiveFailures = 0;
-          hasSnapshot = true;
-          const unchanged = cursor != null && body.version === cursor;
-          cursor = body.version;
-          const everBroadcast = intentEverBroadcast(body);
-          if (["invalid", "canceled"].includes(body.status) && everBroadcast) {
-            terminalObservedAt ??= Date.now();
-          }
-          if (watcherDone(body.status, terminalObservedAt, Date.now(), everBroadcast)) {
-            setTerminalWatchComplete(true);
-            return;
-          }
-          if (unchanged) await new Promise((resolve) => setTimeout(resolve, 500));
+          if (transitioned && !(await readSnapshot(signal))) return;
         } catch (cause) {
           if (!alive || controller.signal.aborted) return;
           consecutiveFailures += 1;
